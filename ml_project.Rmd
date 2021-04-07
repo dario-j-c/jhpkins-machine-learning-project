@@ -9,12 +9,13 @@ output: github_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-```{r library, message=FALSE}
+```{r library, message=FALSE, warning=FALSE}
 library(tidyverse)
 library(tidymodels)
 
 library(workflowsets)
 library(stacks)
+library(vip)
 
 set.seed(123)
 ```
@@ -29,7 +30,7 @@ I chose to approach the problem using gradient boosted trees and decision trees 
 
 The data was also cross validated using stratified sampling where the stratas were based on the outcome variable. This was to ensure each stata (fold) represented the outcome equally and allowed for further protection from overfitting. Other steps were also tested and mentioned in the document.
 
-I concluded by choosing a gradient boosted trees model which gave me accuracy of approximately 97% on the training data. As I used cross validation, hopefully I will not see a significant drop in accuracy when exposed to novel data, in other words, I don't believe my out of sample error will be large.
+I concluded by choosing a gradient boosted trees model which gave me accuracy of approximately 97% on the training data when using cross validation, this did not change when exposed to new data. In other words, I don't believe my actual out of sample error will be much larger than (100% - 97% =) 3%.
 
 A prediction for the testing data was also done.
 
@@ -89,11 +90,19 @@ rev_pml_training <- rev_pml_training %>%
   mutate_if(is.character, as.factor)
 ```
 
+```{r Split the Data}
+rev_pml_training_split <- rev_pml_training %>%
+  initial_split(prop = 3/4, strata = classe)
+
+rev_pml_training_train <- training(rev_pml_training_split)
+
+```
+
 The stratified folds were created using the cleaned dataset
 
 ```{r Create Folds for Cross Validation, message=FALSE}
 
-folds <- vfold_cv(rev_pml_training,
+folds <- vfold_cv(rev_pml_training_train,
                   strata = classe,    # This is stratified sampling
                   v = 5)              # This is 5-fold cross-validation
 ```
@@ -108,7 +117,7 @@ You will notice at this step I already specified the formula to be used (`classe
 
 # This is the recipe to be used with trees
 classe_rec <- recipe(classe ~ .,
-                     data = rev_pml_training) %>%
+                     data = rev_pml_training_train) %>%
 # Update the first seven (7) columns as ID and thus not use them as predictors
   update_role(X1,
               user_name,
@@ -258,7 +267,7 @@ In total, I generated `r num_grid_models` models (including resampling & tuning)
 
 ## Results
 
-I found the best model was **boosted trees using decorrelation via removing variables**, details can be found in the following table and plot.
+I found the best model was **boosted trees without any decorrelation**, details can be found in the following table and plot.
 
 Interestingly, decorrelation using PCA proved to be worse than using no decorrelation at all, rather than assume this to be a fault of PCA, I'm currently leaning to its under performance being due to my ignorance in how to best use PCA in general.
 
@@ -346,7 +355,7 @@ best_result <- grid_results %>%
     ) %>%
   select_best(metric = "accuracy")
 
-
+# Calculate metrics on reserved data for testing
 # The if statement is a quick work around for the time needed to calculate
 if (any(list.files() == "final.fit.RData")) {
   load("final.fit.RData")
@@ -356,16 +365,38 @@ if (any(list.files() == "final.fit.RData")) {
         as.character(ranked_results[1,"wflow_id"])
         ) %>%
       finalize_workflow(best_result) %>%
-      fit(rev_pml_training)
+      last_fit(split = rev_pml_training_split) 
     
     save(final_fit, file = "final.fit.RData")
   }
 
 
-# Predict on test data using model
-prediction <- predict(final_fit, rev_pml_test)
-prediction
+# Accuracy on simulated out of sample data
+final_fit %>% 
+     collect_metrics()
+
+# Pull final workflow
+final_workflow <- final_fit %>% 
+  pluck(".workflow", 1)
 
 
+# Show plot of the most influential predictors affecting the predictions
+final_workflow %>%
+  pull_workflow_fit() %>%
+  vip(num_features = 20)
+
+# Predict 20 values
+final_workflow  %>%
+  predict(new_data = rev_pml_test)
 
 ```
+
+## Conclusion
+
+Accuracy testing on a validation dataset when using cross validation and after when using new data had little change which gives us confidence that the out sample error would also be similar (remember error = 1 - accuracy).
+
+This makes sense as cross validation is a method for calculating out of sample accuracy (and thus out of sample error). Cross validation is most useful when the dataset is too small to split and use one for estimating accuracy. We can use these calculations as a type of validation of this.
+
+-   accuracy with just cross validation: approx. 97.2% (error = 2.8%)
+
+-   accuracy with new data: approx. approx. 97.6% (error = 2.4%)

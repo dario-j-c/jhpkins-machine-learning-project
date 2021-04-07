@@ -8,17 +8,9 @@ library(tidyverse)
 library(tidymodels)
 
 library(workflowsets)
-```
-
-    ## Warning: package 'workflowsets' was built under R version 4.0.4
-
-``` r
 library(stacks)
-```
+library(vip)
 
-    ## Warning: package 'stacks' was built under R version 4.0.4
-
-``` r
 set.seed(123)
 ```
 
@@ -44,10 +36,10 @@ protection from overfitting. Other steps were also tested and mentioned
 in the document.
 
 I concluded by choosing a gradient boosted trees model which gave me
-accuracy of approximately 97% on the training data. As I used cross
-validation, hopefully I will not see a significant drop in accuracy when
-exposed to novel data, in other words, I don’t believe my out of sample
-error will be large.
+accuracy of approximately 97% on the training data when using cross
+validation, this did not change when exposed to new data. In other
+words, I don’t believe my actual out of sample error will be much larger
+than (100% - 97% =) 3%.
 
 A prediction for the testing data was also done.
 
@@ -112,10 +104,17 @@ rev_pml_training <- rev_pml_training %>%
   mutate_if(is.character, as.factor)
 ```
 
+``` r
+rev_pml_training_split <- rev_pml_training %>%
+  initial_split(prop = 3/4, strata = classe)
+
+rev_pml_training_train <- training(rev_pml_training_split)
+```
+
 The stratified folds were created using the cleaned dataset
 
 ``` r
-folds <- vfold_cv(rev_pml_training,
+folds <- vfold_cv(rev_pml_training_train,
                   strata = classe,    # This is stratified sampling
                   v = 5)              # This is 5-fold cross-validation
 ```
@@ -135,7 +134,7 @@ seven (7) I specify, are to be predictors).
 ``` r
 # This is the recipe to be used with trees
 classe_rec <- recipe(classe ~ .,
-                     data = rev_pml_training) %>%
+                     data = rev_pml_training_train) %>%
 # Update the first seven (7) columns as ID and thus not use them as predictors
   update_role(X1,
               user_name,
@@ -292,9 +291,8 @@ will choose the best one to be used for predictions.
 
 ## Results
 
-I found the best model was **boosted trees using decorrelation via
-removing variables**, details can be found in the following table and
-plot.
+I found the best model was **boosted trees without any decorrelation**,
+details can be found in the following table and plot.
 
 Interestingly, decorrelation using PCA proved to be worse than using no
 decorrelation at all, rather than assume this to be a fault of PCA, I’m
@@ -322,18 +320,18 @@ ranked_results
     ## # A tibble: 12 x 5
     ##     rank .config              wflow_id                 metric    mean
     ##    <int> <chr>                <chr>                    <chr>    <dbl>
-    ##  1     1 Preprocessor2_Model1 filter_cor_boosted_trees accuracy 0.970
-    ##  2     1 Preprocessor2_Model1 filter_cor_boosted_trees roc_auc  0.998
-    ##  3     2 Preprocessor1_Model1 simple_boosted_trees     accuracy 0.935
-    ##  4     2 Preprocessor1_Model1 simple_boosted_trees     roc_auc  0.994
-    ##  5     3 Preprocessor1_Model2 simple_decision_tree     accuracy 0.886
-    ##  6     3 Preprocessor1_Model2 simple_decision_tree     roc_auc  0.974
-    ##  7     4 Preprocessor4_Model1 filter_cor_decision_tree accuracy 0.765
-    ##  8     4 Preprocessor4_Model1 filter_cor_decision_tree roc_auc  0.931
-    ##  9     5 Preprocessor2_Model1 filter_pca_boosted_trees accuracy 0.569
-    ## 10     5 Preprocessor2_Model1 filter_pca_boosted_trees roc_auc  0.847
-    ## 11     6 Preprocessor3_Model2 filter_pca_decision_tree accuracy 0.482
-    ## 12     6 Preprocessor3_Model2 filter_pca_decision_tree roc_auc  0.772
+    ##  1     1 Preprocessor1_Model4 simple_boosted_trees     accuracy 0.972
+    ##  2     1 Preprocessor1_Model4 simple_boosted_trees     roc_auc  0.999
+    ##  3     2 Preprocessor2_Model1 filter_cor_boosted_trees accuracy 0.887
+    ##  4     2 Preprocessor2_Model1 filter_cor_boosted_trees roc_auc  0.984
+    ##  5     3 Preprocessor1_Model4 simple_decision_tree     accuracy 0.907
+    ##  6     3 Preprocessor1_Model4 simple_decision_tree     roc_auc  0.977
+    ##  7     4 Preprocessor2_Model1 filter_cor_decision_tree accuracy 0.855
+    ##  8     4 Preprocessor2_Model1 filter_cor_decision_tree roc_auc  0.952
+    ##  9     5 Preprocessor1_Model2 filter_pca_decision_tree accuracy 0.493
+    ## 10     5 Preprocessor1_Model2 filter_pca_decision_tree roc_auc  0.756
+    ## 11     6 Preprocessor1_Model2 filter_pca_boosted_trees accuracy 0.431
+    ## 12     6 Preprocessor1_Model2 filter_pca_boosted_trees roc_auc  0.738
 
 ``` r
 # Plot comparing metrics for the best models 
@@ -413,7 +411,7 @@ best_result <- grid_results %>%
     ) %>%
   select_best(metric = "accuracy")
 
-
+# Calculate metrics on reserved data for testing
 # The if statement is a quick work around for the time needed to calculate
 if (any(list.files() == "final.fit.RData")) {
   load("final.fit.RData")
@@ -423,15 +421,41 @@ if (any(list.files() == "final.fit.RData")) {
         as.character(ranked_results[1,"wflow_id"])
         ) %>%
       finalize_workflow(best_result) %>%
-      fit(rev_pml_training)
+      last_fit(split = rev_pml_training_split) 
     
     save(final_fit, file = "final.fit.RData")
   }
 
 
-# Predict on test data using model
-prediction <- predict(final_fit, rev_pml_test)
-prediction
+# Accuracy on simulated out of sample data
+final_fit %>% 
+     collect_metrics()
+```
+
+    ## # A tibble: 2 x 4
+    ##   .metric  .estimator .estimate .config             
+    ##   <chr>    <chr>          <dbl> <chr>               
+    ## 1 accuracy multiclass     0.976 Preprocessor1_Model1
+    ## 2 roc_auc  hand_till      0.999 Preprocessor1_Model1
+
+``` r
+# Pull final workflow
+final_workflow <- final_fit %>% 
+  pluck(".workflow", 1)
+
+
+# Show plot of the most influential predictors affecting the predictions
+final_workflow %>%
+  pull_workflow_fit() %>%
+  vip(num_features = 20)
+```
+
+![](ml_project_files/figure-gfm/unnamed-chunk-1-1.png)<!-- -->
+
+``` r
+# Predict 20 values
+final_workflow  %>%
+  predict(new_data = rev_pml_test)
 ```
 
     ## # A tibble: 20 x 1
@@ -442,7 +466,7 @@ prediction
     ##  3 B          
     ##  4 A          
     ##  5 A          
-    ##  6 C          
+    ##  6 E          
     ##  7 D          
     ##  8 B          
     ##  9 A          
@@ -457,3 +481,19 @@ prediction
     ## 18 B          
     ## 19 B          
     ## 20 B
+
+## Conclusion
+
+Accuracy testing on a validation dataset when using cross validation and
+after when using new data had little change which gives us confidence
+that the out sample error would also be similar (remember error = 1 -
+accuracy).
+
+This makes sense as cross validation is a method for calculating out of
+sample accuracy (and thus out of sample error). Cross validation is most
+useful when the dataset is too small to split and use one for estimating
+accuracy. We can use these calculations as a type of validation of this.
+
+-   accuracy with just cross validation: approx. 97.2% (error = 2.8%)
+
+-   accuracy with new data: approx. approx. 97.6% (error = 2.4%)
