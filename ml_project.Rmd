@@ -1,0 +1,371 @@
+---
+title: "Project_Report"
+author: "Dario J C"
+date: "04/04/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r library, message=FALSE}
+library(tidyverse)
+library(tidymodels)
+
+library(workflowsets)
+library(stacks)
+
+set.seed(123)
+```
+
+## Executive Summary
+
+This project will be exploring the provided Weight Lifting Exercises Dataset which captures movement data while carrying out specific exercises.
+
+The goal was to predict the outcome variable "**classe**" using any chosen predictor variables and methodology.
+
+I chose to approach the problem using gradient boosted trees and decision trees while retaining almost all of the attributes to be used as dependants. This was done as these methods are useful for classification problems while sidestepping the need for a large amount of preprocessing (e.g. normalizing or scaling the data).
+
+The data was also cross validated using stratified sampling where the stratas were based on the outcome variable. This was to ensure each stata (fold) represented the outcome equally and allowed for further protection from overfitting. Other steps were also tested and mentioned in the document.
+
+I concluded by choosing a gradient boosted trees model which gave me accuracy of approximately 97% on the training data. As I used cross validation, hopefully I will not see a significant drop in accuracy when exposed to novel data, in other words, I don't believe my out of sample error will be large.
+
+A prediction for the testing data was also done.
+
+You will notice I chose to use the `tidymodels` package instead of `caret` to carry out my analysis. In some ways you may see see `tidymodel` as `caret`'s spiritual successor since the same individual, Max Kuhn (along with others) is the author of the package, where Mr. Kuhn has designed it to be a 'tidy' version of `caret`. Personally I'm simply more familiar with it. The text blurbs and comments will explain what the code is doing to allow for easier reading.
+
+As I'm now learning R and code in general, I'd appreciate any advice or corrections.
+
+## Preliminaries
+
+I download the given data set.
+
+```{r Download Data, warning = FALSE}
+# Download the data
+
+pml_training <- read_csv("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv",
+                         col_types = cols(raw_timestamp_part_1 = col_double(),
+                                          cvtd_timestamp = col_datetime(format = "%d/%m/%Y %H:%M"),
+                                          kurtosis_picth_belt = col_double(),
+                                          kurtosis_roll_belt = col_double(),
+                                          kurtosis_yaw_belt = col_double(),
+                                          skewness_roll_belt = col_double(),
+                                          skewness_roll_belt.1 = col_double(),
+                                          skewness_yaw_belt = col_double(),
+                                          max_yaw_belt = col_double(),
+                                          min_yaw_belt = col_double(),
+                                          amplitude_yaw_belt = col_double(),
+                                          kurtosis_picth_arm = col_double(),
+                                          kurtosis_yaw_arm = col_double(),
+                                          skewness_pitch_arm = col_double(),
+                                          skewness_yaw_arm = col_double(),
+                                          kurtosis_yaw_dumbbell = col_double(),
+                                          skewness_yaw_dumbbell = col_double(),
+                                          kurtosis_roll_forearm = col_double(),
+                                          kurtosis_picth_forearm = col_double(),
+                                          kurtosis_yaw_forearm = col_double(),
+                                          skewness_roll_forearm = col_double(),
+                                          skewness_pitch_forearm = col_double(),
+                                          skewness_yaw_forearm = col_double(),
+                                          max_yaw_forearm = col_double(),
+                                          min_yaw_forearm = col_double(),
+                                          amplitude_yaw_forearm = col_double()))
+
+
+
+```
+
+The data was cleaned by removing any columns with NAs and any columns with just one variable. Any columns with only text were switched from character to factor.
+
+```{r Clean Data}
+
+# Remove columns with any NA's from data frame
+rev_pml_training <- Filter(function(x)!any(is.na(x)), pml_training)
+# Remove columns with only one factor i.e. all values are the same
+rev_pml_training <- Filter(function(x)length(unique(x)) > 1, rev_pml_training)
+# Change remaining columns which are characters to factors
+rev_pml_training <- rev_pml_training %>% 
+  mutate_if(is.character, as.factor)
+```
+
+The stratified folds were created using the cleaned dataset
+
+```{r Create Folds for Cross Validation, message=FALSE}
+
+folds <- vfold_cv(rev_pml_training,
+                  strata = classe,    # This is stratified sampling
+                  v = 5)              # This is 5-fold cross-validation
+```
+
+## Recipes
+
+Recipes are `tidymodel`'s way for specifying the steps to apply to a dataset before applying a model to it. Although they can specify both preprocessing and processing steps, I will be using them for preprocessing only. This allowed me to use this one main recipe for both of the models I used.
+
+You will notice at this step I already specified the formula to be used (`classe` is the outcome variable and every other column, excluding seven (7) I specify, are to be predictors).
+
+```{r Create Recipes}
+
+# This is the recipe to be used with trees
+classe_rec <- recipe(classe ~ .,
+                     data = rev_pml_training) %>%
+# Update the first seven (7) columns as ID and thus not use them as predictors
+  update_role(X1,
+              user_name,
+              raw_timestamp_part_1,
+              raw_timestamp_part_2,
+              cvtd_timestamp,
+              new_window,
+              num_window,
+              new_role = "ID") %>%
+  # Remove all predictors which only have a single value
+  step_zv(all_predictors())
+
+```
+
+### Filters
+
+Filters are also recipes but they are used to specify steps to be tested to see how effective they are for your chosen metric(s).
+
+In this case I've created two filters,
+
+-   one filter (`step_corr`) attempts to remove variables to keep the largest absolute correlation between variables beneath a threshold you specify.
+
+-   The second filter (`step_pca`) also attempts to limit inter-variable correlation but through the use of principal component analysis.
+
+These methods also allowed me to set hyperparamters for them (as well as in the following code) by using the placeholder `tune()`. `tidymodel` will set these parameters for you while using your specified metric(s) as the goal post.
+
+```{r Corellation Filter / Recipe}
+
+filter_cor_rec <- 
+   classe_rec %>%
+   step_corr(all_predictors(),
+             threshold = tune())
+```
+
+```{r Correlation Filter / Recipe Via PCA}
+filter_pca_rec <- 
+   classe_rec %>% # classe_knn_rec
+   step_pca(all_predictors(), num_comp = tune()) %>% 
+   step_normalize(all_predictors())
+```
+
+## Models
+
+Models are used to specify the model used and formulas, in this case I chose to only specify the model for cleaner code.
+
+Although using different packages and models, you can see that specifying the code uses the same terms. This is because `tidymodel` keeps care of interacting with the different packages.
+
+Here I specify the two models, to be used and choose which of their hyperparameters to be tuned.
+
+```{r Create Model Specification}
+
+# Decision trees
+dtree_mod <- decision_tree(tree_depth = tune(),
+                    cost_complexity = tune(),
+                    min_n = tune()) %>%
+  set_engine("rpart") %>%
+  set_mode("classification") %>%
+  translate()
+
+# Boosted trees
+xgb_mod <- boost_tree(tree_depth = tune(),
+                      learn_rate = tune(),
+                      loss_reduction = tune(),
+                      min_n = tune(),
+                      sample_size = tune(),
+                      trees = 1000) %>%
+  set_engine("xgboost") %>%
+  set_mode("classification") %>%
+  translate()
+```
+
+## Workflow
+
+Workflows allow me to combine the components I created and combine them as I see fit.
+
+Here my code is set up to model the following:
+
+-   Boosted Trees
+
+    -   WIth PCA decorrelation
+
+    -   With decorrelation via variable removal
+
+    -   As is
+
+-   Decision Trees
+
+    -   With PCA decorrelation
+
+    -   With decorrelation via variable removal
+
+    -   As is
+
+```{r Create Workflow}
+
+# Create Workflow sets
+all_wfset <-
+  workflow_set(
+    preproc = list(simple = classe_rec,
+                   filter_cor = filter_cor_rec,
+                   filter_pca = filter_pca_rec),
+    models = list(decision_tree = dtree_mod,
+                  boosted_trees = xgb_mod),
+    cross = TRUE)
+
+```
+
+### Tuning
+
+I also tune my values to find the best hyperparameters for my data. Here I use a grid of five (5).
+
+```{r Tune Models}
+
+# Bear in mind this code snippet takes some time to run, as such I made preparations to avoid the long run time
+
+grid_ctrl <-
+  control_grid(
+    save_pred = TRUE,
+    parallel_over = "everything",
+    save_workflow = TRUE,
+    verbose = TRUE
+    )
+
+# The if statement is a quick work around for the time needed to tune
+if (any(list.files() == "grid.results.RData")) {
+  load("grid.results.RData")
+  } else {
+    grid_results <-
+      all_wfset %>%
+      workflow_map(fn = "tune_grid",
+                   seed = 1503,
+                   resamples = folds,
+                   grid = 5,
+                   control = grid_ctrl,
+                   verbose = TRUE
+               )
+    save(grid_results, file = "grid.results.RData")
+  }
+
+# The total number of models ran
+num_grid_models <- nrow(collect_metrics(grid_results,
+                                        summarize = FALSE))
+
+```
+
+In total, I generated `r num_grid_models` models (including resampling & tuning) and will choose the best one to be used for predictions.
+
+## Results
+
+I found the best model was **boosted trees using decorrelation via removing variables**, details can be found in the following table and plot.
+
+Interestingly, decorrelation using PCA proved to be worse than using no decorrelation at all, rather than assume this to be a fault of PCA, I'm currently leaning to its under performance being due to my ignorance in how to best use PCA in general.
+
+I'd also note that the decision trees performed better without decorrelation and considering how much faster I personally found the decision tree to run than gradient boosted trees with only a small drop in accuracy, if time constrained I would use a decision tree.
+
+```{r Display Results}
+
+# Table showing best performing models
+ranked_results <- grid_results %>%
+  rank_results(select_best = TRUE) %>%
+  select(rank,
+         .config,
+         wflow_id,
+         metric = .metric,
+         mean) %>%
+ slice_head(n = 12)
+ranked_results
+
+# Plot comparing metrics for the best models 
+autoplot(
+  grid_results,
+  select_best = TRUE)
+
+
+# Plot AUC-ROC curve for the best model
+grid_results %>%
+  collect_predictions(summarise = TRUE) %>%
+  filter(.config == as.character(ranked_results[1,".config"]) &
+           wflow_id == as.character(ranked_results[1,"wflow_id"])) %>%
+  roc_curve(classe, .pred_A:.pred_E) %>%
+  ggplot(aes(x = 1 - specificity, y = sensitivity)) +
+  geom_point(lwd = 0.5, alpha = 0.4) +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "AUC-ROC Curve for best model")
+
+```
+
+## Predictions
+
+I will now apply the best model generated to predict on the test data. You will notice I will only now import the data, thus allowing me to avoid tampering with it.
+
+```{r}
+
+# Download Test Data in same the manner as Training Data
+pml_test <- read_csv("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv",
+                         col_types = cols(raw_timestamp_part_1 = col_double(),
+                                          cvtd_timestamp = col_datetime(format = "%d/%m/%Y %H:%M"),
+                                          kurtosis_picth_belt = col_double(),
+                                          kurtosis_roll_belt = col_double(),
+                                          kurtosis_yaw_belt = col_double(),
+                                          skewness_roll_belt = col_double(),
+                                          skewness_roll_belt.1 = col_double(),
+                                          skewness_yaw_belt = col_double(),
+                                          max_yaw_belt = col_double(),
+                                          min_yaw_belt = col_double(),
+                                          amplitude_yaw_belt = col_double(),
+                                          kurtosis_picth_arm = col_double(),
+                                          kurtosis_yaw_arm = col_double(),
+                                          skewness_pitch_arm = col_double(),
+                                          skewness_yaw_arm = col_double(),
+                                          kurtosis_yaw_dumbbell = col_double(),
+                                          skewness_yaw_dumbbell = col_double(),
+                                          kurtosis_roll_forearm = col_double(),
+                                          kurtosis_picth_forearm = col_double(),
+                                          kurtosis_yaw_forearm = col_double(),
+                                          skewness_roll_forearm = col_double(),
+                                          skewness_pitch_forearm = col_double(),
+                                          skewness_yaw_forearm = col_double(),
+                                          max_yaw_forearm = col_double(),
+                                          min_yaw_forearm = col_double(),
+                                          amplitude_yaw_forearm = col_double()))
+
+
+# Keep only the columns found in Training Data
+rev_pml_test <- pml_test[intersect(names(rev_pml_training), names(pml_test))] %>%
+  mutate_if(is.character, as.factor)
+
+# Finalise model
+
+#Extract tuned parameters for best model
+best_result <- grid_results %>%
+  pull_workflow_set_result(
+    as.character(ranked_results[1,"wflow_id"])
+    ) %>%
+  select_best(metric = "accuracy")
+
+
+# The if statement is a quick work around for the time needed to calculate
+if (any(list.files() == "final.fit.RData")) {
+  load("final.fit.RData")
+  } else {
+    final_fit <- grid_results %>%
+      pull_workflow(
+        as.character(ranked_results[1,"wflow_id"])
+        ) %>%
+      finalize_workflow(best_result) %>%
+      fit(rev_pml_training)
+    
+    save(final_fit, file = "final.fit.RData")
+  }
+
+
+# Predict on test data using model
+prediction <- predict(final_fit, rev_pml_test)
+prediction
+
+
+
+```
